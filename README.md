@@ -10,10 +10,24 @@
 
 ## 安装
 
+安装依赖（Debian / Ubuntu）：
+
 ```bash
-apt-get install -y curl jq                     # RHEL 系使用 dnf install -y curl jq
-curl -fsSL -o /root/cf-ddns.sh https://raw.githubusercontent.com/ECYCloud/DDNS/main/cf-ddns.sh
-bash /root/cf-ddns.sh install && rm -f /root/cf-ddns.sh
+apt-get update && apt-get install -y curl jq
+```
+
+安装依赖（RHEL / Rocky / AlmaLinux）：
+
+```bash
+dnf install -y curl jq
+```
+
+下载并安装脚本：
+
+```bash
+curl -fsSL -o /usr/local/bin/cf-ddns https://raw.githubusercontent.com/ECYCloud/DDNS/main/cf-ddns.sh
+chmod 755 /usr/local/bin/cf-ddns
+cf-ddns install
 ```
 
 安装后生成：
