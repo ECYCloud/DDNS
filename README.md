@@ -1,101 +1,50 @@
 # Cloudflare DDNS
 
-将服务器当前的公网 IPv4 / IPv6 同步到 Cloudflare 的 A / AAAA 记录，由 systemd 定时器每 5 分钟执行一次。
+将服务器当前的公网 IPv4 / IPv6 自动同步到 Cloudflare 的 A / AAAA 记录，支持多个域名，每个域名可单独设置是否开启代理。
 
 ## 准备
 
-- 使用 systemd 的 Linux 服务器，以 root 执行以下命令（sudo 用户先执行 `sudo -i`）
+- 使用 systemd 的 Linux 服务器，以 root 执行命令（sudo 用户先执行 `sudo -i`）
 - Cloudflare API 令牌：「我的个人资料 → API 令牌 → 创建令牌 → 编辑区域 DNS」，区域资源只选目标域名，不要设置客户端 IP 筛选
 - 区域 ID：域名「概述」页右侧 API 区域
 
 ## 安装
 
-安装依赖（Debian / Ubuntu）：
-
 ```bash
-apt-get update && apt-get install -y curl jq
+curl -fsSL -o /usr/local/bin/cf-ddns https://raw.githubusercontent.com/ECYCloud/DDNS/main/cf-ddns.sh && chmod 755 /usr/local/bin/cf-ddns && cf-ddns install
 ```
 
-安装依赖（RHEL / Rocky / AlmaLinux）：
+按提示依次填写：
+
+1. Cloudflare API 令牌
+2. 区域 ID
+3. 域名：逐个输入，每个域名选择是否开启代理，全部输入完后直接回车
+4. 是否更新 IPv4 / IPv6（默认值按本机检测结果给出）
+5. 每多少分钟执行一次
+
+填完后自动试运行，成功即启用定时任务。缺少 jq 等依赖时会自动安装；服务器没有 curl 时先执行 `apt-get install -y curl` 或 `dnf install -y curl`。
+
+## 修改配置
 
 ```bash
-dnf install -y curl jq
-```
-
-下载并安装脚本：
-
-```bash
-curl -fsSL -o /usr/local/bin/cf-ddns https://raw.githubusercontent.com/ECYCloud/DDNS/main/cf-ddns.sh
-chmod 755 /usr/local/bin/cf-ddns
 cf-ddns install
 ```
 
-安装后生成：
+按提示修改，方括号内为当前值，直接回车保留。修改域名、代理开关、执行间隔等都用这条命令。
 
-| 路径 | 用途 |
-| ---- | ---- |
-| `/usr/local/bin/cf-ddns` | 脚本 |
-| `/etc/cf-ddns.conf` | 配置，权限 600 |
-| `/etc/systemd/system/cf-ddns.service`、`cf-ddns.timer` | 定时任务 |
+## 更新
 
-## 配置
+重新执行「安装」中的命令，已有配置作为默认值，一路回车即可保留。旧版配置中的 `CF_RECORD_NAME` / `CF_PROXIED` 会自动并入新的域名列表，代理状态沿用 Cloudflare 上的当前设置。
 
-```bash
-nano /etc/cf-ddns.conf
-```
-
-RHEL 系未预装 nano，可改用 `vi`，或先执行 `dnf install -y nano`。
-
-| 配置项 | 说明 |
-| ---- | ---- |
-| `CF_API_TOKEN` | API 令牌 |
-| `CF_ZONE_ID` | 区域 ID |
-| `CF_RECORDS` | 要更新的记录，格式 `域名:是否开启代理`，多个用英文逗号分隔 |
-| `ENABLE_IPV4` / `ENABLE_IPV6` | 是否更新 A / AAAA 记录，无 IPv6 时设为 `false` |
-| `CF_TTL` | 新建未开代理记录的 TTL，`1` 为自动 |
-
-格式为 `KEY=VALUE`，等号两侧和值内都不能有空格（`CF_RECORDS` 的逗号后也不加空格），行尾可加 `# 注释`。
-
-`CF_RECORDS` 示例：`1.example.com` 开启代理，`2.example.com` 仅 DNS。
-
-```ini
-CF_RECORDS=1.example.com:true,2.example.com:false
-```
-
-## 启用
-
-试运行，确认输出无报错：
-
-```bash
-cf-ddns
-```
-
-启用定时任务：
-
-```bash
-systemctl enable --now cf-ddns.timer
-```
-
-## 维护
+## 常用命令
 
 | 操作 | 命令 |
 | ---- | ---- |
-| 查看下次执行时间 | `systemctl list-timers cf-ddns.timer` |
 | 查看最近日志 | `journalctl -u cf-ddns -n 20 --no-pager` |
+| 查看下次执行时间 | `systemctl list-timers cf-ddns.timer` |
 | 立即执行一次 | `systemctl start cf-ddns.service` |
 
-修改执行间隔：执行 `systemctl edit cf-ddns.timer`，写入以下内容后保存，再执行 `systemctl restart cf-ddns.timer`。第一行会清除全部原有定时设置，因此需同时写回开机后 1 分钟的首次执行。
-
-```ini
-[Timer]
-OnUnitActiveSec=
-OnBootSec=1min
-OnUnitActiveSec=10min
-```
-
-更新：重新执行「安装」中的下载与 `install` 命令。配置文件会按新版格式重写：令牌、区域 ID、域名、开关等配置值保持不变，注释、配置项顺序和新增配置项更新为新版；旧版的 `CF_RECORD_NAME` / `CF_PROXIED` 并入 `CF_RECORDS`，代理状态沿用 Cloudflare 上该记录的当前设置。自定义间隔会保留。
-
-卸载：
+## 卸载
 
 ```bash
 systemctl disable --now cf-ddns.timer
@@ -106,9 +55,9 @@ systemctl daemon-reload
 
 ## 说明
 
+- 配置保存在 `/etc/cf-ddns.conf`（权限 600），也可直接编辑：执行间隔以外的修改在下次运行时生效，修改执行间隔需再执行 `cf-ddns install`。
 - 记录不存在时自动新建；已存在时同步 IP 和代理状态，不修改 TTL。
-- 开启代理后访问者连接的是 Cloudflare，只能用于网页服务；SSH 等直连服务使用未开代理的记录。
-- 只下载新版脚本、尚未执行 `install` 时，旧版的 `CF_RECORD_NAME` / `CF_PROXIED` 仍按旧版方式工作（代理开关只在新建记录时使用）。
+- 开启代理后访问者连接的是 Cloudflare，只能用于网页服务；SSH 等直连服务使用未开代理的域名。
 - 同名同类型记录存在多条时，该域名报错跳过，需在 Cloudflare 保留一条。
 - 同一份配置同时只运行一个实例，手动运行与定时任务重叠时后者等待前者结束。
-- 令牌仅保存在 `/etc/cf-ddns.conf`，不会出现在进程参数或日志中。
+- 令牌仅保存在配置文件中，不会出现在进程参数或日志中。
