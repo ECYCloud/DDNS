@@ -30,7 +30,7 @@ curl -fsSL -o /usr/local/bin/cf-ddns https://raw.githubusercontent.com/ECYCloud/
 cf-ddns install
 ```
 
-按提示修改，方括号内为当前值，直接回车保留。修改域名、代理开关、执行间隔等都用这条命令。
+按提示修改，方括号内为当前值，直接回车保留。修改域名时选择 `y`，现有域名会逐个确认是否保留、是否开启代理，之后可继续输入新增的域名。
 
 ## 更新
 

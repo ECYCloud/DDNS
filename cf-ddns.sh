@@ -158,25 +158,46 @@ ask_yes_no() {
     done
 }
 
-# 逐个输入域名并选择是否开启代理，结果写入 CFG_CF_RECORDS
+# 设置域名列表，结果写入 CFG_CF_RECORDS：已有域名逐个确认保留与代理开关，再输入新增域名
 ask_records() {
-    local name proxied list='' keep=true
-    if [[ -n "$CFG_CF_RECORDS" ]]; then
-        echo "当前域名（域名:是否开启代理）：$CFG_CF_RECORDS"
-        ask_yes_no keep "保留当前域名列表"
-        [[ "$keep" == false ]] || return 0
+    local item name proxied list='' change=false keep items=()
+    IFS=, read -ra items <<<"$(tr '[:upper:]' '[:lower:]' <<<"$CFG_CF_RECORDS")"
+    if ((${#items[@]})); then
+        echo "当前域名："
+        for item in "${items[@]}"; do
+            [[ -z "$item" ]] || echo "  ${item%%:*}（代理$([[ "${item##*:}" == true ]] && echo 开启 || echo 关闭)）"
+        done
+        ask_yes_no change "是否修改域名（增删域名或调整代理）"
+        [[ "$change" == true ]] || return 0
+        echo "逐个确认现有域名，直接回车保持原设置"
+        for item in "${items[@]}"; do
+            name=${item%%:*}
+            [[ -n "$name" ]] || continue
+            if [[ ! "$name" =~ $DOMAIN_RE ]]; then
+                echo "  已移除格式不正确的域名：$name"
+                continue
+            fi
+            keep=true
+            ask_yes_no keep "保留 $name"
+            [[ "$keep" == true ]] || continue
+            [[ "${item##*:}" == true ]] && proxied=true || proxied=false
+            ask_yes_no proxied "  $name 是否开启 Cloudflare 代理（开启后只能用于网页服务）"
+            [[ ",$list," == *",$name:"* ]] || list+="${list:+,}$name:$proxied"
+        done
+        echo "输入要新增的域名，没有或输入完后直接回车"
+    else
+        echo "逐个输入要自动更新的域名，全部输入完后直接回车"
     fi
-    echo "逐个输入要自动更新的域名，全部输入完后直接回车"
     while true; do
         read -rp "域名：" name
         name=$(tr '[:upper:]' '[:lower:]' <<<"${name//[[:space:]]/}")
         if [[ -z "$name" ]]; then
             [[ -z "$list" ]] || break
-            echo "  至少输入一个域名"
+            echo "  至少需要一个域名，请输入"
         elif [[ ! "$name" =~ $DOMAIN_RE ]]; then
             echo "  域名格式不正确，例如 ddns.example.com"
         elif [[ ",$list," == *",$name:"* ]]; then
-            echo "  已输入过该域名"
+            echo "  该域名已在列表中"
         else
             proxied=false
             ask_yes_no proxied "  $name 是否开启 Cloudflare 代理（开启后只能用于网页服务）"
