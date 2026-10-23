@@ -18,11 +18,10 @@ install_self() {
         (umask 077 && cat >"$CONFIG_FILE" <<'EOF'
 CF_API_TOKEN=          # Cloudflare API 令牌，用「编辑区域 DNS」模板创建
 CF_ZONE_ID=            # 域名概述页右侧 API 区域里的区域 ID（32 位）
-CF_RECORD_NAME=        # 完整记录名，例如 ddns.example.com
+CF_RECORDS=            # 域名:是否开启代理，多个用英文逗号分隔，例如 1.example.com:true,2.example.com:false
 ENABLE_IPV4=true       # 是否更新 A 记录：true / false
 ENABLE_IPV6=true       # 是否更新 AAAA 记录：true / false
-CF_TTL=1               # 新建记录的 TTL（秒），1 表示自动；已有记录不改
-CF_PROXIED=false       # 新建记录是否开启代理；保持 false，否则解析到 Cloudflare 的 IP
+CF_TTL=1               # 新建未开代理记录的 TTL（秒），1 表示自动；已有记录不改
 EOF
         )
     fi
@@ -59,9 +58,9 @@ EOF
 
 # 按白名单逐行读取 KEY=VALUE（允许行尾 # 注释），不 source 配置文件，避免执行其中的代码
 load_config() {
-    local line key n=0 skip='^[[:space:]]*(#|$)' pair='^([A-Z0-9_]+)="?([^"#[:space:]]*)"?[[:space:]]*(#.*)?$'
-    CF_API_TOKEN='' CF_ZONE_ID='' CF_RECORD_NAME='' ENABLE_IPV4='' ENABLE_IPV6='' CF_TTL='' CF_PROXIED=''
-    [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "无法读取 $CONFIG_FILE，请先执行 install"
+    local line key item seen=, n=0 skip='^[[:space:]]*(#|$)' pair='^([A-Z0-9_]+)="?([^"#[:space:]]*)"?[[:space:]]*(#.*)?$'
+    CF_API_TOKEN='' CF_ZONE_ID='' CF_RECORDS='' ENABLE_IPV4='' ENABLE_IPV6='' CF_TTL='' RECORDS=()
+    [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "无法读取 $CONFIG_FILE：请以 root 运行，尚未安装时先执行 install"
     while IFS= read -r line || [[ -n "$line" ]]; do
         n=$((n + 1))
         line=${line%$'\r'}
@@ -70,15 +69,23 @@ load_config() {
         [[ "$line" =~ $pair ]] || die "$CONFIG_FILE 第 $n 行格式错误"
         key=${BASH_REMATCH[1]}
         case "$key" in
-            CF_API_TOKEN | CF_ZONE_ID | CF_RECORD_NAME | ENABLE_IPV4 | ENABLE_IPV6 | CF_TTL | CF_PROXIED) printf -v "$key" '%s' "${BASH_REMATCH[2]}" ;;
+            CF_API_TOKEN | CF_ZONE_ID | CF_RECORDS | ENABLE_IPV4 | ENABLE_IPV6 | CF_TTL) printf -v "$key" '%s' "${BASH_REMATCH[2]}" ;;
             *) die "$CONFIG_FILE 第 $n 行：未知配置项 $key" ;;
         esac
     done <"$CONFIG_FILE"
     [[ "$CF_API_TOKEN" =~ ^[A-Za-z0-9_-]{20,}$ ]] || die "CF_API_TOKEN 未填写或格式不正确"
     [[ "$CF_ZONE_ID" =~ ^[a-f0-9]{32}$ ]] || die "CF_ZONE_ID 未填写或格式不正确"
-    [[ "$CF_RECORD_NAME" =~ ^([A-Za-z0-9_-]{1,63}\.)+[A-Za-z0-9-]{2,63}$ ]] || die "CF_RECORD_NAME 未填写或格式不正确"
-    [[ "$ENABLE_IPV4" =~ ^(true|false)$ && "$ENABLE_IPV6" =~ ^(true|false)$ && "$CF_PROXIED" =~ ^(true|false)$ ]] ||
-        die "ENABLE_IPV4、ENABLE_IPV6、CF_PROXIED 只能是 true 或 false"
+    # Cloudflare 的域名不区分大小写，统一转小写后再查重
+    IFS=, read -ra RECORDS <<<"$(tr '[:upper:]' '[:lower:]' <<<"$CF_RECORDS")"
+    ((${#RECORDS[@]})) || die "CF_RECORDS 未填写"
+    for item in "${RECORDS[@]}"; do
+        [[ "$item" =~ ^(([A-Za-z0-9_-]{1,63}\.)+[A-Za-z0-9-]{2,63}):(true|false)$ ]] ||
+            die "CF_RECORDS 中的「$item」格式不正确，应为 域名:true 或 域名:false"
+        [[ "$seen" != *",${BASH_REMATCH[1]},"* ]] || die "CF_RECORDS 中的 ${BASH_REMATCH[1]} 重复"
+        seen+="${BASH_REMATCH[1]},"
+    done
+    [[ "$ENABLE_IPV4" =~ ^(true|false)$ && "$ENABLE_IPV6" =~ ^(true|false)$ ]] || die "ENABLE_IPV4、ENABLE_IPV6 只能是 true 或 false"
+    [[ "$ENABLE_IPV4" == true || "$ENABLE_IPV6" == true ]] || die "ENABLE_IPV4 与 ENABLE_IPV6 不能同时为 false"
     [[ "$CF_TTL" == 1 || ("$CF_TTL" =~ ^[1-9][0-9]{1,4}$ && "$CF_TTL" -ge 60 && "$CF_TTL" -le 86400) ]] || die "CF_TTL 只能是 1 或 60-86400"
 }
 
@@ -110,55 +117,70 @@ get_ip() {
     return 1
 }
 
-# 用法：sync_record A|AAAA 4|6
+# 用法：sync_record A|AAAA IP 域名 true|false
 sync_record() {
-    local type=$1 ip resp count id current body
-    if ! ip=$(get_ip "$2"); then
-        log "$type：获取公网 IPv$2 失败"
-        return 1
-    fi
-    resp=$(cf_api GET "?type=$type&name=$CF_RECORD_NAME") || return 1
+    local type=$1 ip=$2 name=$3 proxied=$4 resp count id current current_proxied body change=''
+    resp=$(cf_api GET "?type=$type&name.exact=$name") || return 1
     count=$(jq '.result | length' <<<"$resp")
     case "$count" in
         0)
-            body=$(jq -nc --arg t "$type" --arg n "$CF_RECORD_NAME" --arg c "$ip" --argjson ttl "$CF_TTL" --argjson p "$CF_PROXIED" \
-                '{type: $t, name: $n, content: $c, ttl: $ttl, proxied: $p}')
+            # 开启代理的记录 TTL 固定为自动
+            body=$(jq -nc --arg t "$type" --arg n "$name" --arg c "$ip" --argjson ttl "$CF_TTL" --argjson p "$proxied" \
+                '{type: $t, name: $n, content: $c, ttl: (if $p then 1 else $ttl end), proxied: $p}')
             cf_api POST "" "$body" >/dev/null || return 1
-            log "$type：已创建 $CF_RECORD_NAME -> $ip"
+            log "$type：$name 已创建（IP $ip，代理 $proxied）"
             ;;
         1)
             id=$(jq -r '.result[0].id' <<<"$resp")
             current=$(jq -r '.result[0].content' <<<"$resp")
-            [[ "$id" =~ ^[a-f0-9]{32}$ ]] || { log "$type：记录 ID 格式异常"; return 1; }
-            if [[ "$current" == "$ip" ]]; then
-                log "$type：未变化（$ip）"
+            current_proxied=$(jq -r '.result[0].proxied' <<<"$resp")
+            [[ "$id" =~ ^[a-f0-9]{32}$ ]] || { log "$type：$name 记录 ID 格式异常"; return 1; }
+            [[ "$current" == "$ip" ]] || change="IP $current -> $ip"
+            [[ "$current_proxied" == "$proxied" ]] || change+="${change:+，}代理 $current_proxied -> $proxied"
+            if [[ -z "$change" ]]; then
+                log "$type：$name 未变化（IP $ip，代理 $proxied）"
                 return 0
             fi
-            # 只改 IP，保留记录现有的 TTL 与代理状态
-            cf_api PATCH "/$id" "$(jq -nc --arg c "$ip" '{content: $c}')" >/dev/null || return 1
-            log "$type：$CF_RECORD_NAME $current -> $ip"
+            # 只改 IP 与代理状态，保留记录现有的 TTL
+            cf_api PATCH "/$id" "$(jq -nc --arg c "$ip" --argjson p "$proxied" '{content: $c, proxied: $p}')" >/dev/null || return 1
+            log "$type：$name 已更新（$change）"
             ;;
         *)
-            log "$type：$CF_RECORD_NAME 存在 $count 条记录，请在 Cloudflare 只保留一条"
+            log "$type：$name 存在 $count 条记录，请在 Cloudflare 只保留一条"
             return 1
             ;;
     esac
 }
 
-case "${1:-}" in
-    install) install_self; exit 0 ;;
-    "") ;;
-    *) die "用法：cf-ddns [install]" ;;
-esac
-command -v curl >/dev/null && command -v jq >/dev/null || die "缺少依赖：需要 curl 与 jq"
-load_config
-API="https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records"
+main() {
+    local rc=0 family type version enabled ip item
+    case "${1:-}" in
+        install) install_self; return 0 ;;
+        "") ;;
+        *) die "用法：cf-ddns [install]" ;;
+    esac
+    command -v curl >/dev/null && command -v jq >/dev/null && command -v flock >/dev/null || die "缺少依赖：需要 curl、jq 与 flock"
+    load_config
+    # 以配置文件加锁：同一份配置同时只运行一个实例，避免手动运行与定时任务重复创建记录
+    exec 9<"$CONFIG_FILE"
+    flock -w 120 9 || die "另一个 cf-ddns 运行超过 120 秒仍未结束，本次退出"
+    API="https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records"
 
-rc=0
-if [[ "$ENABLE_IPV4" == true ]]; then
-    sync_record A 4 || rc=1
-fi
-if [[ "$ENABLE_IPV6" == true ]]; then
-    sync_record AAAA 6 || rc=1
-fi
-exit "$rc"
+    for family in A:4 AAAA:6; do
+        type=${family%:*} version=${family#*:}
+        enabled=ENABLE_IPV$version
+        [[ "${!enabled}" == true ]] || continue
+        if ! ip=$(get_ip "$version"); then
+            log "$type：获取公网 IPv$version 失败"
+            rc=1
+            continue
+        fi
+        for item in "${RECORDS[@]}"; do
+            sync_record "$type" "$ip" "${item%:*}" "${item##*:}" || { log "$type：${item%:*} 同步失败"; rc=1; }
+        done
+    done
+    return "$rc"
+}
+
+# 主流程放在函数内且与 exit 同行：bash 执行前已读完整个流程，运行中脚本文件被更新覆盖也不受影响
+main "$@"; exit $?
