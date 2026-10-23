@@ -40,7 +40,7 @@ cf-ddns install
 
 | 操作 | 命令 |
 | ---- | ---- |
-| 查看最近日志 | `journalctl -u cf-ddns -n 20 --no-pager` |
+| 查看最近日志 | `journalctl --namespace=cf-ddns -n 20 --no-pager`（systemd 低于 245 时用 `journalctl -u cf-ddns -n 20 --no-pager`） |
 | 查看下次执行时间 | `systemctl list-timers cf-ddns.timer` |
 | 立即执行一次 | `systemctl start cf-ddns.service` |
 
@@ -48,8 +48,9 @@ cf-ddns install
 
 ```bash
 systemctl disable --now cf-ddns.timer
-rm -f /usr/local/bin/cf-ddns /etc/cf-ddns.conf /etc/systemd/system/cf-ddns.service /etc/systemd/system/cf-ddns.timer
-rm -rf /etc/systemd/system/cf-ddns.timer.d
+systemctl stop systemd-journald@cf-ddns.service
+rm -f /usr/local/bin/cf-ddns /etc/cf-ddns.conf /etc/systemd/system/cf-ddns.service /etc/systemd/system/cf-ddns.timer /etc/systemd/journald@cf-ddns.conf
+rm -rf /etc/systemd/system/cf-ddns.timer.d "/var/log/journal/$(cat /etc/machine-id).cf-ddns"
 systemctl daemon-reload
 ```
 
@@ -60,4 +61,6 @@ systemctl daemon-reload
 - 开启代理后访问者连接的是 Cloudflare，只能用于网页服务；SSH 等直连服务使用未开代理的域名。
 - 同名同类型记录存在多条时，该域名报错跳过，需在 Cloudflare 保留一条。
 - 同一份配置同时只运行一个实例，手动运行与定时任务重叠时后者等待前者结束。
+- 日志只记录新建、更新记录和出错；记录未变化时不写日志，在终端手动执行 `cf-ddns` 时仍会显示。
+- DDNS 日志单独存放，总量约 10MB，超出时自动删除最旧的日志，不影响服务器上其它服务的日志（需 systemd 245 及以上，较低版本写入系统日志）。systemd 自身的运行失败提示可能记在系统日志中，可用 `journalctl -u cf-ddns` 查看。
 - 令牌仅保存在配置文件中，不会出现在进程参数或日志中。

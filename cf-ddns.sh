@@ -5,6 +5,7 @@ set -euo pipefail
 BIN=/usr/local/bin/cf-ddns
 CONFIG_FILE=${CF_DDNS_CONFIG:-/etc/cf-ddns.conf}
 UNIT_DIR=/etc/systemd/system
+JOURNAL_CONF=/etc/systemd/journald@cf-ddns.conf
 # 配置行格式：KEY=VALUE，值可加双引号，行尾可加 # 注释；SKIP 为可忽略的空行与注释行
 PAIR='^([A-Z0-9_]+)="?([^"#[:space:]]*)"?[[:space:]]*(#.*)?$'
 SKIP='^[[:space:]]*(#|$)'
@@ -230,7 +231,7 @@ configure() {
 
 install_self() {
     [[ $EUID -eq 0 ]] || die "install 需要 root 权限"
-    local src entry key default comment interactive=false
+    local src entry key default comment interactive=false sd_version namespace='' log_cmd='journalctl -u cf-ddns -n 20 --no-pager'
     [[ -t 0 ]] && interactive=true
     ensure_deps
     src=$(realpath "${BASH_SOURCE[0]}")
@@ -243,6 +244,15 @@ install_self() {
     [[ "$interactive" == false ]] || configure
     [[ "$CFG_INTERVAL_MINUTES" =~ $INTERVAL_RE ]] || die "INTERVAL_MINUTES 只能是 1-1440 的整数，请修正 $CONFIG_FILE 后重新执行 cf-ddns install"
     write_config
+    # systemd 245 起支持日志命名空间：DDNS 日志单独存放并限制总量，不影响服务器上其它服务的日志
+    sd_version=$(systemctl --version | awk 'NR == 1 {print $2}')
+    if [[ "$sd_version" =~ ^[0-9]+$ ]] && ((sd_version >= 245)); then
+        namespace='LogNamespace=cf-ddns'
+        log_cmd='journalctl --namespace=cf-ddns -n 20 --no-pager'
+        printf '[Journal]\nSystemMaxUse=10M\n' >"$JOURNAL_CONF"
+    else
+        echo "当前 systemd 版本低于 245，无法单独限制 DDNS 日志大小，日志写入系统日志"
+    fi
     cat >"$UNIT_DIR/cf-ddns.service" <<EOF
 [Unit]
 Description=Cloudflare DDNS
@@ -256,6 +266,10 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
+# 脚本输出记为 notice，并丢弃 systemd 每次启停写的 info 记录；运行失败的 warning 仍保留
+SyslogLevel=notice
+LogLevelMax=notice
+$namespace
 EOF
     cat >"$UNIT_DIR/cf-ddns.timer" <<EOF
 [Unit]
@@ -275,6 +289,8 @@ EOF
         echo "已删除旧的间隔覆盖文件 $UNIT_DIR/cf-ddns.timer.d/interval.conf，执行间隔改由 INTERVAL_MINUTES 控制"
     fi
     systemctl daemon-reload
+    # 日志实例已在运行时重启它，使新的大小限制生效
+    [[ -z "$namespace" ]] || systemctl try-restart systemd-journald@cf-ddns.service
     if [[ "$interactive" == false ]]; then
         # 定时任务已启用时重启它，使新的执行间隔立即生效
         systemctl try-restart cf-ddns.timer
@@ -288,7 +304,7 @@ EOF
     fi
     systemctl enable --quiet cf-ddns.timer
     systemctl restart cf-ddns.timer
-    echo "部署完成：每 $CFG_INTERVAL_MINUTES 分钟自动执行一次。查看日志：journalctl -u cf-ddns -n 20 --no-pager"
+    echo "部署完成：每 $CFG_INTERVAL_MINUTES 分钟自动执行一次。查看日志：$log_cmd"
 }
 
 # 按白名单逐行读取 KEY=VALUE（允许行尾 # 注释），不 source 配置文件，避免执行其中的代码
@@ -385,7 +401,8 @@ sync_record() {
             [[ "$current" == "$ip" ]] || change="IP $current -> $ip"
             [[ "$current_proxied" == "$proxied" ]] || change+="${change:+，}代理 $current_proxied -> $proxied"
             if [[ -z "$change" ]]; then
-                log "$type：$name 未变化（IP $ip，代理 $proxied）"
+                # 未变化只在终端手动运行时显示，定时任务不写入日志
+                [[ ! -t 2 ]] || log "$type：$name 未变化（IP $ip，代理 $proxied）"
                 return 0
             fi
             # 只改 IP 与代理状态，保留记录现有的 TTL
