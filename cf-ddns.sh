@@ -82,7 +82,7 @@ read_config() {
         [[ -z "$CFG_CF_PROXIED" || "$CFG_CF_PROXIED" =~ ^(true|false)$ ]] || die "CF_PROXIED 只能是 true 或 false，配置文件未改动；请修正后重新执行 cf-ddns install"
         name=$(tr '[:upper:]' '[:lower:]' <<<"$CFG_CF_RECORD_NAME")
         if [[ ",$(tr '[:upper:]' '[:lower:]' <<<"$CFG_CF_RECORDS")," == *",$name:"* ]]; then
-            echo "CF_RECORDS 中已有 $name，旧版 CF_RECORD_NAME / CF_PROXIED 已移除"
+            echo "CF_RECORDS 中已有 ${name}，旧版 CF_RECORD_NAME / CF_PROXIED 已移除"
         else
             proxied=$(legacy_proxied "$name") || die "无法读取 Cloudflare 上 $name 的代理状态，配置文件未改动；请检查网络、令牌及 curl / jq 是否已安装后重新执行 cf-ddns install"
             CFG_CF_RECORDS="${CFG_CF_RECORDS:+$CFG_CF_RECORDS,}$name:$proxied"
@@ -311,7 +311,7 @@ EOF
 load_config() {
     local line key item items seen=, n=0
     CF_API_TOKEN='' CF_ZONE_ID='' CF_RECORDS='' CF_RECORD_NAME='' CF_PROXIED='' ENABLE_IPV4='' ENABLE_IPV6='' CF_TTL='' RECORDS=()
-    [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "无法读取 $CONFIG_FILE：请以 root 运行，尚未安装时先执行 install"
+    [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || die "无法读取 ${CONFIG_FILE}：请以 root 运行，尚未安装时先执行 install"
     while IFS= read -r line || [[ -n "$line" ]]; do
         n=$((n + 1))
         line=${line%$'\r'}
@@ -332,7 +332,7 @@ load_config() {
     IFS=, read -ra items <<<"$(tr '[:upper:]' '[:lower:]' <<<"$CF_RECORDS")"
     for item in ${items[@]+"${items[@]}"}; do
         [[ "$item" =~ ^([^:]*):(true|false)$ && "${BASH_REMATCH[1]}" =~ $DOMAIN_RE ]] ||
-            die "CF_RECORDS 中的「$item」格式不正确，应为 域名:true 或 域名:false"
+            die "CF_RECORDS 中的「${item}」格式不正确，应为 域名:true 或 域名:false"
         [[ "$seen" != *",${item%:*},"* ]] || die "CF_RECORDS 中的 ${item%:*} 重复"
         seen+="${item%:*},"
         RECORDS+=("$item:1")
@@ -390,27 +390,27 @@ sync_record() {
             body=$(jq -nc --arg t "$type" --arg n "$name" --arg c "$ip" --argjson ttl "$CF_TTL" --argjson p "$proxied" \
                 '{type: $t, name: $n, content: $c, ttl: (if $p then 1 else $ttl end), proxied: $p}')
             cf_api POST "" "$body" >/dev/null || return 1
-            log "$type：$name 已创建（IP $ip，代理 $proxied）"
+            log "${type}：$name 已创建（IP ${ip}，代理 ${proxied}）"
             ;;
         1)
             id=$(jq -r '.result[0].id' <<<"$resp")
             current=$(jq -r '.result[0].content' <<<"$resp")
             current_proxied=$(jq -r '.result[0].proxied' <<<"$resp")
-            [[ "$id" =~ ^[a-f0-9]{32}$ ]] || { log "$type：$name 记录 ID 格式异常"; return 1; }
+            [[ "$id" =~ ^[a-f0-9]{32}$ ]] || { log "${type}：$name 记录 ID 格式异常"; return 1; }
             [[ "$sync_proxied" == 1 ]] || proxied=$current_proxied
             [[ "$current" == "$ip" ]] || change="IP $current -> $ip"
             [[ "$current_proxied" == "$proxied" ]] || change+="${change:+，}代理 $current_proxied -> $proxied"
             if [[ -z "$change" ]]; then
                 # 未变化只在终端手动运行时显示，定时任务不写入日志
-                [[ ! -t 2 ]] || log "$type：$name 未变化（IP $ip，代理 $proxied）"
+                [[ ! -t 2 ]] || log "${type}：$name 未变化（IP ${ip}，代理 ${proxied}）"
                 return 0
             fi
             # 只改 IP 与代理状态，保留记录现有的 TTL
             cf_api PATCH "/$id" "$(jq -nc --arg c "$ip" --argjson p "$proxied" '{content: $c, proxied: $p}')" >/dev/null || return 1
-            log "$type：$name 已更新（$change）"
+            log "${type}：$name 已更新（${change}）"
             ;;
         *)
-            log "$type：$name 存在 $count 条记录，请在 Cloudflare 只保留一条"
+            log "${type}：$name 存在 $count 条记录，请在 Cloudflare 只保留一条"
             return 1
             ;;
     esac
@@ -435,13 +435,13 @@ main() {
         enabled=ENABLE_IPV$version
         [[ "${!enabled}" == true ]] || continue
         if ! ip=$(get_ip "$version"); then
-            log "$type：获取公网 IPv$version 失败"
+            log "${type}：获取公网 IPv$version 失败"
             rc=1
             continue
         fi
         for item in "${RECORDS[@]}"; do
             IFS=: read -r name proxied sync_proxied <<<"$item"
-            sync_record "$type" "$ip" "$name" "$proxied" "$sync_proxied" || { log "$type：$name 同步失败"; rc=1; }
+            sync_record "$type" "$ip" "$name" "$proxied" "$sync_proxied" || { log "${type}：$name 同步失败"; rc=1; }
         done
     done
     return "$rc"
